@@ -28,7 +28,7 @@ sol = ODE.solve(prob, ODE.Tsit5())
 
 # Plot the solution
 Plots.plot(sol)
-Plots.savefig("LV_ode.png")
+# Plots.savefig("LV_ode.png")
 
 function loss(p)
     sol = ODE.solve(prob, ODE.Tsit5(), p = p, saveat = tsteps)
