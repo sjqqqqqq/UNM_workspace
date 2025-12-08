@@ -13,5 +13,5 @@ ocp = @def begin
     ( x₁(10)^2 + x₂(10)^2 ) + ∫( 0.5u(t)^2 ) → min
 end
 
-sol = solve(ocp)
+sol = solve(ocp; init=(state=[0.0, 0.0], control=0.0), display=true)
 plot(sol)
