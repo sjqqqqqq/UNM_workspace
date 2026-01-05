@@ -1,4 +1,4 @@
-# HEngg quantum optimal control using GRAPE.jl
+# qCOMBAT quantum optimal control using GRAPE.jl
 # Solves the same problem as HEngg_qCOMBAT.py but using Julia's GRAPE.jl
 
 using LinearAlgebra
@@ -16,9 +16,6 @@ const Γ = Float64[
     0 1 1 0
 ]
 
-# Identity matrices
-const I4 = Matrix{ComplexF64}(I, 4, 4)
-const I16 = Matrix{ComplexF64}(I, 16, 16)
 
 # Helper function for tensor product
 ⊗(A, B) = kron(A, B)
@@ -31,17 +28,17 @@ function projector(site_idx::Int)
 end
 
 # Projectors for subsystem a (first index)
-const P_a_sites = [projector(s) ⊗ I4 for s in 0:3]
+const P_a_sites = [projector(s) ⊗ I(4) for s in 0:3]
 
 # Projectors for subsystem b (second index)
-const P_b_sites = [I4 ⊗ projector(t) for t in 0:3]
+const P_b_sites = [I(4) ⊗ projector(t) for t in 0:3]
 
 # Interaction Hamiltonian base (diagonal interaction between matching sites)
 const H_int_base = sum(projector(s) ⊗ projector(s) for s in 0:3)
 
 # Hopping Hamiltonians
-const H_hop_a = Γ ⊗ I4
-const H_hop_b = I4 ⊗ Γ
+const H_hop_a = Γ ⊗ I(4)
+const H_hop_b = I(4) ⊗ Γ
 
 # Define the time-dependent Hamiltonian structure
 # In the Python code, the Hamiltonian alternates:
@@ -301,7 +298,6 @@ function analyze_results(opt_result, problem, tlist)
         ylabel="Fidelity",
         title="Fidelity vs Time (GRAPE.jl)",
         legend=false,
-        marker=:circle,
         linewidth=2
     )
 
@@ -313,25 +309,30 @@ function analyze_results(opt_result, problem, tlist)
     nt = length(tlist) - 1
 
     # U control (index 9)
-    U_ctrl = [optimized_controls[9](t) for t in tlist[1:end-1]]
+    U_ctrl = optimized_controls[9]
 
     # Ja control (index 10)
-    Ja_ctrl = [optimized_controls[10](t) for t in tlist[1:end-1]]
+    Ja_ctrl = optimized_controls[10]
 
     # Jb control (index 11)
-    Jb_ctrl = [optimized_controls[11](t) for t in tlist[1:end-1]]
+    Jb_ctrl = optimized_controls[11]
+
+    # Ensure arrays match in length
+    n_ctrl = min(nt, length(U_ctrl), length(Ja_ctrl), length(Jb_ctrl))
+    t_plot = tlist[1:n_ctrl]
 
     p2 = plot(
-        tlist[1:end-1],
-        U_ctrl,
+        t_plot,
+        U_ctrl[1:n_ctrl],
         xlabel="Time",
         ylabel="Amplitude",
         title="Optimized Controls",
         label="U (interaction)",
-        linewidth=2
+        linewidth=2,
+        seriestype=:steppost
     )
-    plot!(p2, tlist[1:end-1], Ja_ctrl, label="Jₐ (hopping a)", linewidth=2)
-    plot!(p2, tlist[1:end-1], Jb_ctrl, label="Jᵦ (hopping b)", linewidth=2)
+    plot!(p2, t_plot, Ja_ctrl[1:n_ctrl], label="Jₐ (hopping a)", linewidth=2, seriestype=:steppost)
+    plot!(p2, t_plot, Jb_ctrl[1:n_ctrl], label="Jᵦ (hopping b)", linewidth=2, seriestype=:steppost)
 
     # Combine plots
     p = plot(p1, p2, layout=(2, 1), size=(800, 600))
