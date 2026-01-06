@@ -2,3 +2,17 @@
 **/.claude/
 **/Manifest.toml
 **/.vscode/
+**/.venv/
+
+# Generated plots
+Fig*.png
+
+# Temporary/debug files
+debug_*.py
+debug_*.jl
+test_*.py
+test_*.jl
+trace_*.py
+trace_*.jl
+compare_outputs.*
+python_random_init.txt
