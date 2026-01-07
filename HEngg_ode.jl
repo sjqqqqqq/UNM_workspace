@@ -1,11 +1,10 @@
-# test_ode.jl
-# Compare matrix exponential evolution vs ODE evolution
-# Self-contained version with GRAPE optimization included
+# HEngg_ode.jl
+# Time evolution from input pulse - no optimization
+# Input a pulse and get the time evolution using ODE solver
 
 using LinearAlgebra
 using DifferentialEquations
 using Plots
-using Random
 
 # ===== QUANTUM SYSTEM SETUP =====
 const Gamma = Float64[0 1 1 0;
@@ -201,196 +200,7 @@ function H_step(p::PulseFull, m::Int)
     end
 end
 
-function unitaries(p::PulseFull)
-    return [exp(-1im * H_step(p, m) * p.dt) for m in 0:(2*p.n-1)]
-end
-
-# ===== GRAPE OPTIMIZER =====
-mutable struct GRAPEAdam
-    p::PulseFull
-    lr::Float64
-    beta1::Float64
-    beta2::Float64
-    eps::Float64
-    l2::Float64
-    m::Dict{Symbol, Array{Float64}}
-    v::Dict{Symbol, Array{Float64}}
-    t::Int
-
-    function GRAPEAdam(pulse::PulseFull; lr=0.08, beta1=0.9, beta2=0.999, eps=1e-8, l2=1e-5)
-        m = Dict{Symbol, Array{Float64}}(
-            :Va => zeros(size(pulse.Va)),
-            :Vb => zeros(size(pulse.Vb)),
-            :U => zeros(size(pulse.U)),
-            :Ja => zeros(size(pulse.Ja)),
-            :Jb => zeros(size(pulse.Jb))
-        )
-        v = Dict{Symbol, Array{Float64}}(
-            k => zeros(size(val)) for (k, val) in m
-        )
-        new(pulse, lr, beta1, beta2, eps, l2, m, v, 0)
-    end
-end
-
-function forward(opt::GRAPEAdam, psi0::Vector{ComplexF64})
-    Us = unitaries(opt.p)
-    psis = [psi0]
-    for U in Us
-        push!(psis, U * psis[end])
-    end
-    return psis, Us
-end
-
-function gradients(opt::GRAPEAdam, psi0::Vector{ComplexF64}, psi_target::Vector{ComplexF64})
-    n = opt.p.n
-    dt = opt.p.dt
-
-    psis, Us = forward(opt, psi0)
-    psiT = psis[end]
-    overlap = dot(psi_target, psiT)
-    F = real(overlap * conj(overlap))
-
-    chis = Vector{Union{Nothing, Vector{ComplexF64}}}(nothing, 2*n+1)
-    chis[end] = psi_target .* conj(overlap)
-
-    for m in (2*n-1):-1:0
-        chis[m+1] = transpose(conj(Us[m+1])) * chis[m+2]
-    end
-
-    gVa = zeros(size(opt.p.Va))
-    gVb = zeros(size(opt.p.Vb))
-    gU = zeros(size(opt.p.U))
-    gJa = zeros(size(opt.p.Ja))
-    gJb = zeros(size(opt.p.Jb))
-
-    for m in 0:(2*n-1)
-        k = m ÷ 2 + 1
-        psi_m1 = psis[m+2]
-        chi_mp1 = chis[m+2]
-        fac = conj(overlap)
-
-        if m % 2 == 0
-            for s in 1:4
-                cont = -1im * dt * dot(chi_mp1, P_a_sites[s] * psi_m1)
-                gVa[k, s] += 2.0 * real(cont * fac)
-            end
-            for t in 1:4
-                cont = -1im * dt * dot(chi_mp1, P_b_sites[t] * psi_m1)
-                gVb[k, t] += 2.0 * real(cont * fac)
-            end
-            cont = -1im * dt * dot(chi_mp1, Hint_base * psi_m1)
-            gU[k] += 2.0 * real(cont * fac)
-        else
-            cont_a = -1im * dt * dot(chi_mp1, Hhop_a * psi_m1)
-            gJa[k] += 2.0 * real(cont_a * fac)
-            cont_b = -1im * dt * dot(chi_mp1, Hhop_b * psi_m1)
-            gJb[k] += 2.0 * real(cont_b * fac)
-        end
-    end
-
-    if opt.l2 > 0
-        gVa .-= 2 * opt.l2 .* opt.p.Va
-        gVb .-= 2 * opt.l2 .* opt.p.Vb
-        gU .-= 2 * opt.l2 .* opt.p.U
-        gJa .-= 2 * opt.l2 .* opt.p.Ja
-        gJb .-= 2 * opt.l2 .* opt.p.Jb
-    end
-
-    grads = Dict{Symbol, Array{Float64}}(
-        :Va => gVa, :Vb => gVb, :U => gU, :Ja => gJa, :Jb => gJb
-    )
-
-    return F, overlap, grads
-end
-
-function adam_step!(opt::GRAPEAdam, key::Symbol, g::Array{Float64})
-    opt.t += 1
-
-    m = opt.m[key]
-    v = opt.v[key]
-
-    m .= opt.beta1 .* m .+ (1 - opt.beta1) .* g
-    v .= opt.beta2 .* v .+ (1 - opt.beta2) .* (g .^ 2)
-
-    m_hat = m ./ (1 - opt.beta1^opt.t)
-    v_hat = v ./ (1 - opt.beta2^opt.t)
-
-    return opt.lr .* m_hat ./ (sqrt.(v_hat) .+ opt.eps)
-end
-
-function optimize!(opt::GRAPEAdam, psi0::Vector{ComplexF64}, psi_target::Vector{ComplexF64}; iters=360)
-    hist = Float64[]
-
-    for it in 1:iters
-        F, ov, grads = gradients(opt, psi0, psi_target)
-        push!(hist, F)
-
-        if it % 50 == 0 || it <= 5 || it > 355
-            println("  Iteration $(it-1): Fidelity = $(round(F, digits=10))")
-        end
-
-        for key in [:Va, :Vb, :U, :Ja, :Jb]
-            step = adam_step!(opt, key, grads[key])
-            if key == :Va
-                opt.p.Va .+= step
-            elseif key == :Vb
-                opt.p.Vb .+= step
-            elseif key == :U
-                opt.p.U .+= step
-            elseif key == :Ja
-                opt.p.Ja .+= step
-            elseif key == :Jb
-                opt.p.Jb .+= step
-            end
-        end
-
-        clip!(opt.p)
-    end
-
-    return hist
-end
-
-function fidelity_vs_time(opt::GRAPEAdam, psi0::Vector{ComplexF64}, psi_target::Vector{ComplexF64})
-    psis, _ = forward(opt, psi0)
-    times = range(0.0, opt.p.T, length=2*opt.p.n+1)
-    F_t = [abs(dot(psi_target, psi))^2 for psi in psis]
-    return times, F_t
-end
-
-# ===== OPTIMIZATION SETUP =====
-println("="^60)
-println("RUNNING GRAPE OPTIMIZATION")
-println("="^60)
-
-psi0 = zeros(ComplexF64, 16)
-psi0[idx(0, 1)] = 1.0
-
-psi_target = zeros(ComplexF64, 16)
-psi_target[idx(0, 1)] = 1.0 / sqrt(2)
-psi_target[idx(2, 3)] = 1.0 / sqrt(2)
-
-T = 2 * π
-n = 36
-pulse = PulseFull(n, T, seed=11)
-opt = GRAPEAdam(pulse, lr=0.08, l2=1e-5)
-
-println("\nRunning optimization (360 iterations)...")
-optimize!(opt, psi0, psi_target, iters=360)
-
-t_grid, F_t = fidelity_vs_time(opt, psi0, psi_target)
-
-println("\nOptimization complete!")
-println("Final fidelity: ", F_t[end])
-
-# ===== ODE EVOLUTION TEST =====
-println("\n" * "="^60)
-println("ODE EVOLUTION TEST")
-println("="^60)
-
-println("\nUsing optimized pulse")
-println("Number of steps: ", pulse.n)
-println("Total time T: ", pulse.T)
-println("Time step dt: ", pulse.dt)
+# ===== TIME EVOLUTION FUNCTIONS =====
 
 # Function to get the Hamiltonian at a given time
 function H_at_time(t::Float64, p::PulseFull)
@@ -412,83 +222,85 @@ function schrodinger!(dpsi, psi, params, t)
     dpsi .= -1im * H * psi
 end
 
-# Solve using ODE solver
-println("\nSolving Schrodinger equation using ODE solver...")
-tspan = (0.0, pulse.T)
-prob = ODEProblem(schrodinger!, psi0, tspan, pulse)
+"""
+    evolve_ode(pulse::PulseFull, psi0::Vector{ComplexF64}; n_points=100, abstol=1e-10, reltol=1e-10)
 
-# Use a high-order solver for accuracy
-sol = solve(prob, Tsit5(), saveat=collect(t_grid), abstol=1e-10, reltol=1e-10)
+Evolve the initial state psi0 using the given pulse and ODE solver.
 
-println("ODE solution completed!")
+# Arguments
+- `pulse::PulseFull`: The pulse parameters
+- `psi0::Vector{ComplexF64}`: Initial quantum state (normalized)
+- `n_points::Int`: Number of time points to save (default: 100)
+- `abstol::Float64`: Absolute tolerance for ODE solver (default: 1e-10)
+- `reltol::Float64`: Relative tolerance for ODE solver (default: 1e-10)
 
-# Extract the final state and all intermediate states
-psi_final_ode = sol.u[end]
-psis_ode = sol.u
+# Returns
+- `times::Vector{Float64}`: Time points
+- `states::Vector{Vector{ComplexF64}}`: Quantum states at each time point
+"""
+function evolve_ode(pulse::PulseFull, psi0::Vector{ComplexF64};
+                    n_points::Int=100, abstol::Float64=1e-10, reltol::Float64=1e-10)
+    tspan = (0.0, pulse.T)
+    saveat = range(0.0, pulse.T, length=n_points)
 
-# Compute fidelities for ODE evolution
-F_ode = [abs(dot(psi_target, psi))^2 for psi in psis_ode]
+    prob = ODEProblem(schrodinger!, psi0, tspan, pulse)
+    sol = solve(prob, Tsit5(), saveat=saveat, abstol=abstol, reltol=reltol)
 
-println("\nODE Evolution Results:")
-println("Final fidelity (ODE): ", F_ode[end])
-
-# Now compute using matrix exponential (from the optimized pulse)
-println("\nComputing evolution using matrix exponential...")
-opt = GRAPEAdam(pulse)
-psis_matexp, Us = forward(opt, psi0)
-psi_final_matexp = psis_matexp[end]
-
-# Compute fidelities for matrix exponential
-F_matexp = [abs(dot(psi_target, psi))^2 for psi in psis_matexp]
-
-println("Final fidelity (Matrix Exp): ", F_matexp[end])
-
-# Compare the two methods
-println("\n" * "="^60)
-println("COMPARISON")
-println("="^60)
-
-# Fidelity difference
-fidelity_diff = abs(F_ode[end] - F_matexp[end])
-println("Fidelity difference: ", fidelity_diff)
-
-# State overlap
-state_overlap = abs(dot(psi_final_ode, psi_final_matexp))^2
-println("Final state overlap: ", state_overlap)
-
-# Max fidelity difference over time
-max_fid_diff = maximum(abs.(F_ode .- F_matexp))
-println("Max fidelity difference over time: ", max_fid_diff)
-
-# Plot comparison
-fig_comparison = plot(layout=(2,1), size=(800, 800))
-
-# Subplot 1: Fidelities
-plot!(fig_comparison[1], collect(t_grid), F_matexp, label="Matrix Exp",
-      linewidth=2, color=:blue, xlabel="Time", ylabel="Fidelity",
-      title="Fidelity Comparison")
-plot!(fig_comparison[1], collect(t_grid), F_ode, label="ODE",
-      linewidth=2, color=:red, linestyle=:dash)
-
-# Subplot 2: Difference
-plot!(fig_comparison[2], collect(t_grid), abs.(F_ode .- F_matexp),
-      label="", linewidth=2, color=:black, xlabel="Time",
-      ylabel="|F_ODE - F_MatExp|", title="Fidelity Difference",
-      yscale=:log10)
-
-savefig(fig_comparison, "comparison_ode_vs_matexp.png")
-println("\nComparison plot saved: comparison_ode_vs_matexp.png")
-
-# Print detailed comparison at a few time points
-println("\nDetailed comparison at selected times:")
-println("Time\t\tF_MatExp\tF_ODE\t\tDifference")
-println("-"^60)
-selected_indices = [1, length(t_grid)÷4, length(t_grid)÷2, 3*length(t_grid)÷4, length(t_grid)]
-for i in selected_indices
-    t_val = t_grid[i]
-    println("$(round(t_val, digits=4))\t\t$(round(F_matexp[i], digits=10))\t$(round(F_ode[i], digits=10))\t$(round(abs(F_ode[i] - F_matexp[i]), digits=12))")
+    return collect(sol.t), sol.u
 end
 
-println("\n" * "="^60)
-println("TEST COMPLETE")
-println("="^60)
+# ===== EXAMPLE USAGE =====
+if abspath(PROGRAM_FILE) == @__FILE__
+    println("="^60)
+    println("TIME EVOLUTION FROM INPUT PULSE")
+    println("="^60)
+
+    # Define initial state: |0,1⟩
+    psi0 = zeros(ComplexF64, 16)
+    psi0[idx(0, 1)] = 1.0
+
+    # Create a pulse (you can modify the pulse parameters)
+    T = 2 * π
+    n = 36
+    pulse = PulseFull(n, T, seed=11)
+
+    println("\nPulse parameters:")
+    println("  Number of steps: ", pulse.n)
+    println("  Total time T: ", pulse.T)
+    println("  Time step dt: ", pulse.dt)
+
+    # Evolve the state
+    println("\nEvolving state using ODE solver...")
+    times, states = evolve_ode(pulse, psi0, n_points=200)
+
+    println("Evolution complete!")
+    println("  Number of time points: ", length(times))
+    println("  Final time: ", times[end])
+
+    # Calculate populations over time
+    println("\nCalculating population dynamics...")
+    pops = zeros(length(times), 16)
+    for (i, psi) in enumerate(states)
+        pops[i, :] = abs2.(psi)
+    end
+
+    # Plot population dynamics
+    println("\nPlotting population dynamics...")
+    fig = plot(layout=(1,1), size=(1000, 600))
+
+    # Plot a subset of interesting populations
+    interesting_states = [idx(0,1), idx(1,0), idx(2,3), idx(3,2)]
+    labels = ["|0,1⟩", "|1,0⟩", "|2,3⟩", "|3,2⟩"]
+
+    for (state_idx, label) in zip(interesting_states, labels)
+        plot!(fig, times, pops[:, state_idx], label=label, linewidth=2,
+              xlabel="Time", ylabel="Population", title="Population Dynamics")
+    end
+
+    savefig(fig, "population_dynamics.png")
+    println("\nPlot saved: population_dynamics.png")
+
+    println("\n" * "="^60)
+    println("DONE")
+    println("="^60)
+end
