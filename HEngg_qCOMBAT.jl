@@ -4,6 +4,7 @@
 using LinearAlgebra
 using Random
 using Plots
+using JLD2
 
 # ---- Setup global quantum operators ----
 const Gamma = Float64[0 1 1 0;
@@ -358,12 +359,11 @@ function fidelity_vs_time(opt::GRAPEAdam, psi0::Vector{ComplexF64}, psi_target::
     return times, F_t
 end
 
-# ---- Helper functions ----
+# ---- Helper Functions ----
 function idx(s, t)
     return s * 4 + t + 1  # +1 for 1-based indexing
 end
 
-# ---- Main execution ----
 function ensure_optimized_schedule()
     global pulse, t_grid, F_t
 
@@ -388,6 +388,7 @@ function ensure_optimized_schedule()
     t_grid, F_t = fidelity_vs_time(opt, psi0, psi1)
 end
 
+# ---- Main Execution ----
 # Global variables for optimization results
 pulse = nothing
 t_grid = nothing
@@ -424,31 +425,12 @@ F = F_t                 # fidelities at those times
 V_a = pulse.Va .* 100
 V_b = pulse.Vb .* 100
 
-# --- 1) Fidelity vs time after optimization ---
-plot(t, F, marker=:circle, label="", xlabel="time", ylabel="fidelity with ψ₁",
-     title="Fidelity vs time after optimization")
-savefig("Fig1_basic.png")
-
-# --- 2) U_k vs k (even steps) ---
-k_even = 0:(length(U)-1)
-V1a_temp = V_a[:, 2] .- V_a[:, 1]  # Julia is 1-indexed
-plot(k_even, U, marker=:circle, label="U_k", xlabel="k (even-step index)", ylabel="U_k")
-plot!(k_even, V1a_temp, marker=:circle, label="V1a")
-title!("U_k vs k")
-savefig("Fig2_basic.png")
-
-# --- 3) J_k^a vs k (odd steps) ---
-k_odd = 0:(length(Ja)-1)
-plot(k_odd, Ja, marker=:circle, label="Ja", xlabel="k (odd-step index)", ylabel="J_k")
-plot!(k_odd, Jb, marker=:circle, label="Jb")
-title!("J_k^a vs k")
-savefig("Fig3_basic.png")
-
 # Calculate V differences
 V1a = V_a[:, 2] .- V_a[:, 1]
 V2a = V_a[:, 3] .- V_a[:, 1]
 V3a = V_a[:, 4] .- V_a[:, 1]
 
+# ---- Plotting ----
 # Set plot defaults
 default(fontfamily="Computer Modern",
         titlefontsize=14,
@@ -511,3 +493,16 @@ end
 savefig(fig3, "Fig3.png")
 
 println("\nPlots saved: Fig1.png, Fig2.png, Fig3.png")
+
+# ---- Save Results ----
+println("\nSaving optimized pulse...")
+save("optimized_pulse.jld2",
+     "Va", pulse.Va,
+     "Vb", pulse.Vb,
+     "U", pulse.U,
+     "Ja", pulse.Ja,
+     "Jb", pulse.Jb,
+     "n", pulse.n,
+     "T", pulse.T,
+     "dt", pulse.dt)
+println("Optimized pulse saved to: optimized_pulse.jld2")
