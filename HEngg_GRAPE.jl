@@ -1,15 +1,17 @@
 # HEngg_GRAPE.jl
-# Implements the same quantum control problem as HEngg_ode.jl
-# but using GRAPE.jl package instead of custom GRAPE implementation
+# Quantum control optimization using GRAPE.jl
+# Solves the same problem as HEngg_ode.jl: state transfer from |0,1⟩ to (|0,1⟩ + |2,3⟩)/√2
 
 using LinearAlgebra
-using QuantumControl
-using QuantumPropagators: ExpProp
 using GRAPE
+using QuantumControl
+using QuantumControl.Functionals: J_T_sm
+using QuantumControl.QuantumPropagators: hamiltonian
+using JLD2
 using Plots
 using Random
 
-# ===== QUANTUM SYSTEM SETUP =====
+# ===== QUANTUM SYSTEM SETUP (same as HEngg_ode.jl) =====
 const Gamma = Float64[0 1 1 0;
                       1 0 0 1;
                       1 0 0 1;
@@ -33,326 +35,304 @@ function idx(s, t)
     return s * 4 + t + 1
 end
 
-# ===== BUILD CONTROL HAMILTONIAN STRUCTURE =====
-function build_control_operators()
-    """
-    Build the control operators for GRAPE.jl
-    Returns a list of control operators in order:
-    - 4 operators for Va (on-site potentials for subsystem a, sites 0-3)
-    - 4 operators for Vb (on-site potentials for subsystem b, sites 0-3)
-    - 1 operator for U (interaction strength)
-    - 1 operator for Ja (hopping strength for subsystem a)
-    - 1 operator for Jb (hopping strength for subsystem b)
-    Total: 11 control operators
-    """
-    control_ops = []
+# ===== CONTROL STRUCTURE =====
+# Use simple closures that GRAPE can handle natively.
+# The alternating structure is built into how we initialize and extract controls.
 
-    # Va controls (4)
+function make_piecewise_control(values::Vector{Float64}, tlist::Vector{Float64})
+    """
+    Create a piecewise constant control function.
+    """
+    function ctrl(t)
+        if t <= tlist[1]
+            return values[1]
+        elseif t >= tlist[end]
+            return values[end]
+        end
+        n_intervals = length(tlist) - 1
+        for i in 1:n_intervals
+            if tlist[i] <= t < tlist[i+1]
+                return values[i]
+            end
+        end
+        return values[end]
+    end
+    return ctrl
+end
+
+function create_controls_and_hamiltonian(n::Int, T::Float64; seed::Int=42)
+    """
+    Create initial controls and Hamiltonian for GRAPE optimization.
+
+    The Hamiltonian H = sum_i H_i * u_i(t) with 11 controls:
+    - Controls 1-4: Va (site potentials for particle a)
+    - Controls 5-8: Vb (site potentials for particle b)
+    - Control 9: U (interaction)
+    - Control 10: Ja (hopping for a)
+    - Control 11: Jb (hopping for b)
+    """
+    Random.seed!(seed)
+    dt = T / (2 * n)
+    tlist = collect(range(0.0, T, length=2*n+1))
+
+    # Create control value arrays (2n values each for 2n time intervals)
+    # Initialize with the alternating structure:
+    # - Even intervals (1, 3, 5, ...): Va, Vb, U active
+    # - Odd intervals (2, 4, 6, ...): Ja, Jb active
+
+    control_values = Vector{Vector{Float64}}()
+    control_ops = Vector{Matrix{ComplexF64}}()
+
+    # Va controls (1-4): active on even intervals
     for s in 1:4
+        vals = zeros(2*n)
+        for k in 1:n
+            vals[2*k - 1] = 0.5 * (rand() - 0.5)  # even interval
+        end
+        push!(control_values, vals)
         push!(control_ops, P_a_sites[s])
     end
 
-    # Vb controls (4)
-    for t in 1:4
-        push!(control_ops, P_b_sites[t])
+    # Vb controls (5-8): active on even intervals
+    for s in 1:4
+        vals = zeros(2*n)
+        for k in 1:n
+            vals[2*k - 1] = 0.5 * (rand() - 0.5)
+        end
+        push!(control_values, vals)
+        push!(control_ops, P_b_sites[s])
     end
 
-    # U control (1)
+    # U control (9): active on even intervals
+    vals_U = zeros(2*n)
+    for k in 1:n
+        vals_U[2*k - 1] = 0.5 * rand() + 0.1
+    end
+    push!(control_values, vals_U)
     push!(control_ops, Hint_base)
 
-    # Ja control (1)
+    # Ja control (10): active on odd intervals
+    vals_Ja = zeros(2*n)
+    for k in 1:n
+        vals_Ja[2*k] = 0.5 * rand()
+    end
+    push!(control_values, vals_Ja)
     push!(control_ops, Hhop_a)
 
-    # Jb control (1)
+    # Jb control (11): active on odd intervals
+    vals_Jb = zeros(2*n)
+    for k in 1:n
+        vals_Jb[2*k] = 0.5 * rand()
+    end
+    push!(control_values, vals_Jb)
     push!(control_ops, Hhop_b)
 
-    return control_ops
-end
-
-function create_initial_controls(n::Int, T::Float64; use_optimized::Bool=false, seed::Int=11)
-    """
-    Create initial control guess
-    n: number of segments (each segment has even + odd step)
-    T: total time
-    use_optimized: if true, use the optimized values from HEngg_ode.jl as initial guess
-
-    Returns arrays of control amplitudes for 2n time steps
-    """
-
-    dt = T / (2 * n)
-    
-    # Random initialization
-    Random.seed!(seed)
-    Va = rand(n, 4) .* 2.0 .- 1.0
-    Vb = rand(n, 4) .* 2.0 .- 1.0
-    U = rand(n) .* 1.8 .+ 0.2
-    Ja = rand(n) .* 1.0
-    Jb = rand(n) .* 1.0
-
-    # Create piecewise constant controls for GRAPE.jl
-    # Structure: even steps (0,2,4,...) use Va, Vb, U; odd steps (1,3,5,...) use Ja, Jb
-    controls = []
-
-    # Va controls (4): active on even steps, zero on odd steps
-    for s in 1:4
-        ctrl = zeros(2*n)
-        for k in 1:n
-            ctrl[2*k-1] = Va[k, s]  # even step: indices 1,3,5,...
-        end
-        push!(controls, ctrl)
-    end
-
-    # Vb controls (4): active on even steps, zero on odd steps
-    for t in 1:4
-        ctrl = zeros(2*n)
-        for k in 1:n
-            ctrl[2*k-1] = Vb[k, t]
-        end
-        push!(controls, ctrl)
-    end
-
-    # U control (1): active on even steps, zero on odd steps
-    ctrl_U = zeros(2*n)
-    for k in 1:n
-        ctrl_U[2*k-1] = U[k]
-    end
-    push!(controls, ctrl_U)
-
-    # Ja control (1): active on odd steps, zero on even steps
-    ctrl_Ja = zeros(2*n)
-    for k in 1:n
-        ctrl_Ja[2*k] = Ja[k]  # odd step: indices 2,4,6,...
-    end
-    push!(controls, ctrl_Ja)
-
-    # Jb control (1): active on odd steps, zero on even steps
-    ctrl_Jb = zeros(2*n)
-    for k in 1:n
-        ctrl_Jb[2*k] = Jb[k]
-    end
-    push!(controls, ctrl_Jb)
-
-    return controls
-end
-
-function build_hamiltonian(controls, control_ops, T::Float64, n::Int)
-    """
-    Build time-dependent Hamiltonian for GRAPE.jl
-    """
-    # Drift Hamiltonian (zero in this case)
-    H_drift = zeros(ComplexF64, 16, 16)
-
-    # Create Hamiltonian with piecewise constant controls
-    H_parts = Any[H_drift]
-
-    for (i, op) in enumerate(control_ops)
-        ctrl_vals = controls[i]
-
-        # Create piecewise constant control function
-        ctrl_func = t -> begin
-            if t <= 0
-                return ctrl_vals[1]
-            elseif t >= T
-                return ctrl_vals[end]
-            else
-                # Find the interval index (2n intervals)
-                interval_idx = min(floor(Int, t / (T / (2*n))) + 1, 2*n)
-                return ctrl_vals[interval_idx]
-            end
-        end
-
-        push!(H_parts, (op, ctrl_func))
-    end
-
-    return hamiltonian(H_parts...)
-end
-
-# ===== OPTIMIZATION =====
-function optimize_with_grape(n::Int=36, T::Float64=2π;
-                             iter_stop::Int=360,
-                             use_optimized_init::Bool=false,
-                             seed::Int=11)
-
-    println("="^60)
-    println("GRAPE.jl OPTIMIZATION")
-    println("="^60)
-    println("\nProblem setup:")
-    println("  Number of segments: $n")
-    println("  Total time: $T")
-    println("  Iterations: $iter_stop")
-    println("  Using optimized init: $use_optimized_init")
-
-    # Create control operators
-    control_ops = build_control_operators()
-    println("  Number of controls: $(length(control_ops))")
-
-    # Create initial controls
-    controls = create_initial_controls(n, T; use_optimized=use_optimized_init, seed=seed)
-
-    # Create time grid
-    tlist = collect(range(0, T, length=2*n+1))
+    # Create control functions
+    controls = [make_piecewise_control(vals, tlist) for vals in control_values]
 
     # Build Hamiltonian
-    H = build_hamiltonian(controls, control_ops, T, n)
+    H_drift = zeros(ComplexF64, 16, 16)
+    H_terms = Any[H_drift]
+    for (op, ctrl) in zip(control_ops, controls)
+        push!(H_terms, (op, ctrl))
+    end
+    H = hamiltonian(H_terms...)
 
-    # Initial and target states
+    return H, controls, tlist, dt
+end
+
+function extract_controls_from_result(result, n::Int)
+    """
+    Extract optimized control values from GRAPE result.
+    Convert back to the Va, Vb, U, Ja, Jb format used by HEngg_ode.jl.
+    """
+    opt_ctrls = result.optimized_controls
+
+    Va = zeros(n, 4)
+    Vb = zeros(n, 4)
+    U = zeros(n)
+    Ja = zeros(n)
+    Jb = zeros(n)
+
+    # optimized_controls[l] has length 2n+1 (at grid points)
+    # We extract values at time intervals (indices 1 to 2n)
+
+    for s in 1:4
+        for k in 1:n
+            Va[k, s] = opt_ctrls[s][2*k - 1]        # even intervals
+            Vb[k, s] = opt_ctrls[4 + s][2*k - 1]    # even intervals
+        end
+    end
+
+    for k in 1:n
+        U[k] = opt_ctrls[9][2*k - 1]   # even intervals
+        Ja[k] = opt_ctrls[10][2*k]     # odd intervals
+        Jb[k] = opt_ctrls[11][2*k]     # odd intervals
+    end
+
+    return Va, Vb, U, Ja, Jb
+end
+
+function save_pulse(filename::String, n::Int, T::Float64, Va, Vb, U, Ja, Jb)
+    """
+    Save pulse in the format expected by HEngg_ode.jl
+    """
+    dt = T / (2 * n)
+    jldsave(filename;
+        n = n,
+        T = T,
+        dt = dt,
+        Va = Va,
+        Vb = Vb,
+        U = U,
+        Ja = Ja,
+        Jb = Jb
+    )
+    println("Pulse saved to: $filename")
+end
+
+function run_grape_optimization(; n::Int=36, T::Float64=2π, iter_stop::Int=500, seed::Int=42)
+    """
+    Run GRAPE optimization for the HEngg quantum control problem.
+    """
+    println("="^60)
+    println("GRAPE Optimization for HEngg Quantum Control")
+    println("="^60)
+    println("\nParameters:")
+    println("  n (segments): $n")
+    println("  T (total time): $T")
+    println("  iter_stop: $iter_stop")
+    println("  seed: $seed")
+
+    # Create Hamiltonian and controls
+    H, controls, tlist, dt = create_controls_and_hamiltonian(n, T; seed=seed)
+
+    # Initial state: |0,1⟩
     psi0 = zeros(ComplexF64, 16)
     psi0[idx(0, 1)] = 1.0
 
+    # Target state: (|0,1⟩ + |2,3⟩)/√2
     psi_target = zeros(ComplexF64, 16)
     psi_target[idx(0, 1)] = 1.0 / sqrt(2)
     psi_target[idx(2, 3)] = 1.0 / sqrt(2)
 
     println("\nInitial state: |0,1⟩")
     println("Target state: (|0,1⟩ + |2,3⟩)/√2")
+    println("Number of controls: $(length(controls))")
+    println("Time steps: $(length(tlist) - 1)")
 
-    # Define trajectory
-    trajectory = Trajectory(
-        initial_state=psi0,
-        generator=H,
-        target_state=psi_target
-    )
+    # Create trajectory
+    traj = Trajectory(psi0, H; target_state=psi_target)
 
-    # Define optimization problem
-    problem = ControlProblem(
-        trajectories=[trajectory],
-        tlist=tlist,
-        iter_stop=iter_stop,
-        prop_method=ExpProp,
-        J_T=QuantumControl.Functionals.J_T_sm,  # State-to-state fidelity
-        check_convergence=res -> begin
-            if res.J_T < 1e-6
-                res.converged = true
-                res.message = "J_T < 10⁻⁶"
-            end
-            # Print progress every 50 iterations
-            if res.iter % 50 == 0 || res.iter <= 5 || res.iter > iter_stop - 5
-                fidelity = 1.0 - res.J_T
-                println("  Iteration $(res.iter): Fidelity = $(round(fidelity, digits=10))")
-            end
-        end
-    )
-
+    # Run GRAPE optimization with taylor gradient method
     println("\nStarting GRAPE optimization...")
+    println("-"^60)
 
-    # Run GRAPE optimization
-    opt_result = optimize(problem; method=GRAPE)
-
-    println("\nOptimization complete!")
-    fidelity_final = 1.0 - opt_result.J_T
-    println("  Final fidelity: $fidelity_final")
-    println("  Converged: $(opt_result.converged)")
-    println("  Iterations: $(opt_result.iter)")
-
-    return opt_result, problem, tlist, psi0, psi_target
-end
-
-function analyze_results(opt_result, problem, tlist, psi0, psi_target)
-    """
-    Extract and analyze the optimization results
-    """
-    println("\n" * "="^60)
-    println("RESULTS ANALYSIS")
-    println("="^60)
-
-    # Get optimized controls and propagate
-    trajectory = problem.trajectories[1]
-
-    # Propagate with optimized controls
-    states = propagate_trajectory(
-        trajectory,
+    result = GRAPE.optimize(
+        [traj],
         tlist;
-        method=ExpProp,
-        storage=true
+        J_T = J_T_sm,
+        iter_stop = iter_stop,
+        prop_method = :expprop,
+        print_iters = true,
+        print_iter_info = ["iter.", "J_T", "ǁ∇Jǁ", "ǁΔϵǁ", "ΔJ", "secs"]
     )
 
-    # Calculate fidelities at each time
-    fidelities = [abs2(psi_target' * states[:, i]) for i in 1:length(tlist)]
+    println("-"^60)
+    println("\nOptimization complete!")
+    println("  Final J_T: $(result.J_T)")
+    println("  Final fidelity: $(1.0 - result.J_T)")
+    println("  Converged: $(result.converged)")
+    println("  Message: $(result.message)")
+    println("  Iterations: $(result.iter)")
 
-    println("\nFidelity progression:")
-    println("  Initial: $(round(fidelities[1], digits=10))")
-    println("  Final:   $(round(fidelities[end], digits=10))")
-
-    # Extract optimized controls
-    optimized_controls = opt_result.optimized_controls
-
-    return fidelities, optimized_controls, states
+    return result, tlist, psi0, psi_target, n, T
 end
 
-function plot_results(tlist, fidelities, optimized_controls)
+function plot_results(result, n::Int, T::Float64)
     """
-    Plot fidelity and control amplitudes
+    Plot the optimization results.
     """
     println("\nGenerating plots...")
 
-    # Plot 1: Fidelity vs time
-    p1 = plot(
-        tlist,
-        fidelities,
-        xlabel="Time",
-        ylabel="Fidelity",
-        title="Fidelity vs Time (GRAPE.jl)",
-        legend=false,
-        linewidth=2,
-        color=:blue
-    )
+    # Extract optimized controls
+    Va, Vb, U, Ja, Jb = extract_controls_from_result(result, n)
 
-    # Plot 2: Selected controls (U, Ja, Jb)
-    nt = length(tlist) - 1
-    t_plot = tlist[1:nt]
+    # Create time points for plotting
+    dt = T / (2 * n)
+    t_plot = collect(range(0.0, T - dt/2, length=500))
 
-    # U control (index 9)
-    U_ctrl = optimized_controls[9][1:nt]
+    # Reconstruct control values at each time point
+    U_vals = zeros(length(t_plot))
+    Ja_vals = zeros(length(t_plot))
+    Jb_vals = zeros(length(t_plot))
+    V12_vals = zeros(length(t_plot))
 
-    # Ja control (index 10)
-    Ja_ctrl = optimized_controls[10][1:nt]
+    for (i, t) in enumerate(t_plot)
+        m = floor(Int, t / dt)
+        if m >= 2 * n
+            m = 2 * n - 1
+        end
+        k = m ÷ 2 + 1
 
-    # Jb control (index 11)
-    Jb_ctrl = optimized_controls[11][1:nt]
+        if m % 2 == 0  # even step
+            U_vals[i] = U[k]
+            Ja_vals[i] = 0.0
+            Jb_vals[i] = 0.0
+            V12_vals[i] = Va[k, 2] - Va[k, 1]
+        else  # odd step
+            U_vals[i] = 0.0
+            Ja_vals[i] = Ja[k]
+            Jb_vals[i] = Jb[k]
+            V12_vals[i] = 0.0
+        end
+    end
 
-    p2 = plot(
-        t_plot,
-        U_ctrl,
-        xlabel="Time",
-        ylabel="Amplitude",
-        title="Optimized Controls",
-        label="U (interaction)",
-        linewidth=2,
-        seriestype=:steppost,
-        color=:red
-    )
-    plot!(p2, t_plot, Ja_ctrl, label="Jₐ (hopping a)", linewidth=2, seriestype=:steppost, color=:green)
-    plot!(p2, t_plot, Jb_ctrl, label="Jᵦ (hopping b)", linewidth=2, seriestype=:steppost, color=:orange)
+    # Plot controls
+    p1 = plot(t_plot, U_vals, label="U(t)", color=:blue, linewidth=2,
+              xlabel="Time", ylabel="Amplitude", title="Interaction Strength U")
 
-    # Combine plots
-    fig = plot(p1, p2, layout=(2, 1), size=(800, 800))
+    p2 = plot(t_plot, Ja_vals, label="Ja(t)", color=:red, linewidth=2)
+    plot!(t_plot, Jb_vals, label="Jb(t)", color=:orange, linewidth=2,
+          xlabel="Time", ylabel="Amplitude", title="Hopping Strengths")
 
-    savefig(fig, "HEngg_GRAPE_results.png")
-    println("Plot saved: HEngg_GRAPE_results.png")
+    p3 = plot(t_plot, V12_vals, label="V12(t)", color=:green, linewidth=2,
+              xlabel="Time", ylabel="Amplitude", title="Potential Difference V12")
+
+    fidelity_final = 1.0 - result.J_T
+    p4 = bar([fidelity_final], label="Final Fidelity", color=:purple,
+             xlabel="", ylabel="Fidelity", title="Final Fidelity: $(round(fidelity_final, digits=6))",
+             ylim=(0, 1.05))
+    hline!([1.0], linestyle=:dash, color=:gray, label="Target")
+
+    fig = plot(p1, p2, p3, p4, layout=(2, 2), size=(1000, 800))
+    savefig(fig, "GRAPE_results.png")
+    println("Plots saved to: GRAPE_results.png")
 
     return fig
 end
 
 # ===== MAIN EXECUTION =====
-println("="^60)
-println("HEngg Quantum Control - GRAPE.jl Implementation")
-println("="^60)
+if abspath(PROGRAM_FILE) == @__FILE__
+    # Run optimization
+    result, tlist, psi0, psi_target, n, T = run_grape_optimization(
+        n = 36,
+        T = 2π,
+        iter_stop = 500,
+        seed = 42
+    )
 
-# Run optimization starting from the optimized pulse in HEngg_ode.jl
-println("\nMode: Starting from optimized pulse (for comparison)")
-opt_result, problem, tlist, psi0, psi_target = optimize_with_grape(
-    36, 2π;
-    iter_stop=360,
-    use_optimized_init=true,
-    seed=11
-)
+    # Extract and save optimal pulse
+    Va, Vb, U, Ja, Jb = extract_controls_from_result(result, n)
+    save_pulse("GRAPE_pulse.jld2", n, T, Va, Vb, U, Ja, Jb)
 
-# Analyze results
-fidelities, optimized_controls, states = analyze_results(opt_result, problem, tlist, psi0, psi_target)
+    # Generate plots
+    plot_results(result, n, T)
 
-# Plot results
-fig = plot_results(tlist, fidelities, optimized_controls)
-
-println("\n" * "="^60)
-println("COMPLETE")
-println("="^60)
+    println("\n" * "="^60)
+    println("COMPLETE")
+    println("="^60)
+    println("\nOutput files:")
+    println("  - GRAPE_pulse.jld2 (optimal pulse, compatible with HEngg_ode.jl)")
+    println("  - GRAPE_results.png (visualization)")
+end
