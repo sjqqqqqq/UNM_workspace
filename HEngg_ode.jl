@@ -1,6 +1,6 @@
 # HEngg_ode.jl
-# Time evolution from input pulse - no optimization
-# Input a pulse and get the time evolution using ODE solver
+# Time evolution from input pulse (JLD2 file) - ODE simulation with visualization
+# Usage: julia --project=. HEngg_ode.jl [pulse_file.jld2]
 
 using LinearAlgebra
 using DifferentialEquations
@@ -41,45 +41,24 @@ mutable struct PulseFull
     U::Vector{Float64}
     Ja::Vector{Float64}
     Jb::Vector{Float64}
-    bounds::Dict{Symbol, Tuple{Float64, Float64}}
 
-    function PulseFull(n::Int, T::Real; pulse_file::String="optimized_pulse.jld2")
-        n = Int(n)
-        T = Float64(T)
-        dt = T / (2 * n)
-
-        # Load optimized pulse from file
-        if isfile(pulse_file)
-            data = load(pulse_file)
-            Va = data["Va"]
-            Vb = data["Vb"]
-            U = data["U"]
-            Ja = data["Ja"]
-            Jb = data["Jb"]
-        else
-            error("Pulse file not found: $pulse_file. Please run HEngg_qCOMBAT.jl first to generate the optimized pulse.")
+    function PulseFull(pulse_file::String)
+        if !isfile(pulse_file)
+            error("Pulse file not found: $pulse_file")
         end
 
-        bounds = Dict{Symbol, Tuple{Float64, Float64}}(
-            :Va => (-3.0, 3.0),
-            :Vb => (-3.0, 3.0),
-            :U => (0.0, 6.0),
-            :Ja => (0.0, 5.0),
-            :Jb => (0.0, 5.0)
-        )
+        data = load(pulse_file)
+        n = data["n"]
+        T = data["T"]
+        dt = data["dt"]
+        Va = data["Va"]
+        Vb = data["Vb"]
+        U = data["U"]
+        Ja = data["Ja"]
+        Jb = data["Jb"]
 
-        obj = new(n, T, dt, Va, Vb, U, Ja, Jb, bounds)
-        clip!(obj)
-        return obj
+        return new(n, T, dt, Va, Vb, U, Ja, Jb)
     end
-end
-
-function clip!(p::PulseFull)
-    p.Va .= clamp.(p.Va, p.bounds[:Va]...)
-    p.Vb .= clamp.(p.Vb, p.bounds[:Vb]...)
-    p.U .= clamp.(p.U, p.bounds[:U]...)
-    p.Ja .= clamp.(p.Ja, p.bounds[:Ja]...)
-    p.Jb .= clamp.(p.Jb, p.bounds[:Jb]...)
 end
 
 function H_step(p::PulseFull, m::Int)
@@ -102,44 +81,22 @@ end
 
 # ===== TIME EVOLUTION FUNCTIONS =====
 
-# Function to get the Hamiltonian at a given time
 function H_at_time(t::Float64, p::PulseFull)
-    # Determine which time step we're in
     m = floor(Int, t / p.dt)
-
-    # Make sure we don't go past the last step
     if m >= 2 * p.n
         m = 2 * p.n - 1
     end
-
     return H_step(p, m)
 end
 
-# ODE function: dψ/dt = -iH(t)ψ
 function schrodinger!(dpsi, psi, params, t)
     p = params
     H = H_at_time(t, p)
     dpsi .= -1im * H * psi
 end
 
-"""
-    evolve_ode(pulse::PulseFull, psi0::Vector{ComplexF64}; n_points=100, abstol=1e-10, reltol=1e-10)
-
-Evolve the initial state psi0 using the given pulse and ODE solver.
-
-# Arguments
-- `pulse::PulseFull`: The pulse parameters
-- `psi0::Vector{ComplexF64}`: Initial quantum state (normalized)
-- `n_points::Int`: Number of time points to save (default: 100)
-- `abstol::Float64`: Absolute tolerance for ODE solver (default: 1e-10)
-- `reltol::Float64`: Relative tolerance for ODE solver (default: 1e-10)
-
-# Returns
-- `times::Vector{Float64}`: Time points
-- `states::Vector{Vector{ComplexF64}}`: Quantum states at each time point
-"""
 function evolve_ode(pulse::PulseFull, psi0::Vector{ComplexF64};
-                    n_points::Int=100, abstol::Float64=1e-10, reltol::Float64=1e-10)
+                    n_points::Int=500, abstol::Float64=1e-10, reltol::Float64=1e-10)
     tspan = (0.0, pulse.T)
     saveat = range(0.0, pulse.T, length=n_points)
 
@@ -149,24 +106,127 @@ function evolve_ode(pulse::PulseFull, psi0::Vector{ComplexF64};
     return collect(sol.t), sol.u
 end
 
-# ===== EXAMPLE USAGE =====
+# ===== PULSE INTERPOLATION FOR PLOTTING =====
+function get_pulse_values_at_times(pulse::PulseFull, times::Vector{Float64})
+    n_times = length(times)
+
+    # V differences relative to site 0 (matching HEngg_qCOMBAT.jl)
+    # V12 = Va(site1) - Va(site0)
+    # V21 = Va(site2) - Va(site0)
+    # V22 = Va(site3) - Va(site0)
+    V12_vals = zeros(n_times)
+    V21_vals = zeros(n_times)
+    V22_vals = zeros(n_times)
+    U_vals = zeros(n_times)
+    Ja_vals = zeros(n_times)
+    Jb_vals = zeros(n_times)
+
+    for (i, t) in enumerate(times)
+        m = floor(Int, t / pulse.dt)
+        if m >= 2 * pulse.n
+            m = 2 * pulse.n - 1
+        end
+
+        if m % 2 == 0
+            k = m ÷ 2 + 1
+            # Potential differences (same as HEngg_qCOMBAT.jl)
+            V12_vals[i] = pulse.Va[k, 2] - pulse.Va[k, 1]
+            V21_vals[i] = pulse.Va[k, 3] - pulse.Va[k, 1]
+            V22_vals[i] = pulse.Va[k, 4] - pulse.Va[k, 1]
+            U_vals[i] = pulse.U[k]
+            Ja_vals[i] = 0.0
+            Jb_vals[i] = 0.0
+        else
+            k = m ÷ 2 + 1
+            # During hopping steps, V and U are effectively 0
+            V12_vals[i] = 0.0
+            V21_vals[i] = 0.0
+            V22_vals[i] = 0.0
+            U_vals[i] = 0.0
+            Ja_vals[i] = pulse.Ja[k]
+            Jb_vals[i] = pulse.Jb[k]
+        end
+    end
+
+    return V12_vals, V21_vals, V22_vals, U_vals, Ja_vals, Jb_vals
+end
+
+# ===== MAIN EXECUTION =====
 if abspath(PROGRAM_FILE) == @__FILE__
-    # Initial state: |0,1⟩
+    # Parse command line argument for pulse file
+    pulse_file = length(ARGS) >= 1 ? ARGS[1] : "optimized_pulse.jld2"
+
+    println("Loading pulse from: $pulse_file")
+    pulse = PulseFull(pulse_file)
+    println("Pulse parameters: n=$(pulse.n), T=$(pulse.T), dt=$(pulse.dt)")
+
+    # Initial state: |0,1⟩ (particle a at site 0, particle b at site 1)
     psi0 = zeros(ComplexF64, 16)
     psi0[idx(0, 1)] = 1.0
 
-    # Create pulse and evolve
-    pulse = PulseFull(36, 2π)
-    times, states = evolve_ode(pulse, psi0, n_points=200)
+    # Target state: (|0,1⟩ + |2,3⟩)/sqrt(2) - SPDC-like state
+    psi_target = zeros(ComplexF64, 16)
+    psi_target[idx(0, 1)] = 1.0 / sqrt(2)
+    psi_target[idx(2, 3)] = 1.0 / sqrt(2)
 
-    # Calculate populations and plot
-    pops = hcat([abs2.(psi) for psi in states]...)'
-    interesting_states = [idx(0,1), idx(1,0), idx(2,3), idx(3,2)]
-    labels = ["|0,1⟩", "|1,0⟩", "|2,3⟩", "|3,2⟩"]
+    println("Simulating time evolution...")
+    times, states = evolve_ode(pulse, psi0, n_points=500)
 
-    plot(times, pops[:, interesting_states], label=permutedims(labels),
-         linewidth=2, xlabel="Time", ylabel="Population",
-         title="Population Dynamics", size=(1000, 600))
-    savefig("population_dynamics.png")
-    println("Plot saved: population_dynamics.png")
+    # Calculate fidelity vs time: |⟨target|ψ(t)⟩|²
+    fidelity = [abs2(dot(psi_target, psi)) for psi in states]
+
+    # Get pulse parameter values at each time point
+    V12_vals, V21_vals, V22_vals, U_vals, Ja_vals, Jb_vals = get_pulse_values_at_times(pulse, times)
+
+    println("Final fidelity: $(fidelity[end])")
+
+    # ===== PLOTTING =====
+    println("Generating plots...")
+
+    # Set plot defaults
+    default(fontfamily="Computer Modern", titlefontsize=14, guidefontsize=12,
+            tickfontsize=10, legendfontsize=10, linewidth=2)
+
+    # Figure 1: Fidelity vs Time
+    p1 = plot(times, fidelity,
+              xlabel="Time", ylabel="Fidelity",
+              title="Fidelity vs Time",
+              label="F(t)", color=:blue, legend=:bottomright)
+    hline!([1.0], linestyle=:dash, color=:gray, label="Target", alpha=0.5)
+
+    # Figure 2: V12, V21, V22 vs Time
+    p2 = plot(times, V12_vals, label="V12 (Vb site 1)", color=:red)
+    plot!(times, V21_vals, label="V21 (Va site 2)", color=:green)
+    plot!(times, V22_vals, label="V22 (Vb site 2)", color=:blue)
+    plot!(xlabel="Time", ylabel="Potential",
+          title="Site Potentials vs Time", legend=:topright)
+
+    # Figure 3: U vs Time
+    p3 = plot(times, U_vals,
+              xlabel="Time", ylabel="U",
+              title="Interaction Strength U vs Time",
+              label="U(t)", color=:purple)
+
+    # Figure 4: Ja, Jb vs Time
+    p4 = plot(times, Ja_vals, label="Ja(t)", color=:orange)
+    plot!(times, Jb_vals, label="Jb(t)", color=:cyan)
+    plot!(xlabel="Time", ylabel="Hopping Strength",
+          title="Hopping Parameters vs Time", legend=:topright)
+
+    # Combine all plots into a 2x2 layout
+    combined_plot = plot(p1, p2, p3, p4, layout=(2, 2), size=(1200, 900))
+
+    # Save plots
+    savefig(p1, "fidelity_vs_time.png")
+    savefig(p2, "V_vs_time.png")
+    savefig(p3, "U_vs_time.png")
+    savefig(p4, "J_vs_time.png")
+    savefig(combined_plot, "ode_simulation_results.png")
+
+    println("\nPlots saved:")
+    println("  1. fidelity_vs_time.png")
+    println("  2. V_vs_time.png")
+    println("  3. U_vs_time.png")
+    println("  4. J_vs_time.png")
+    println("  5. ode_simulation_results.png (combined)")
 end
