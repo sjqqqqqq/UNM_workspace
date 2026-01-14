@@ -145,7 +145,7 @@ end
 ## ===== MAIN EXECUTION =====
 
 # Parse command line argument for pulse file
-pulse_file = length(ARGS) >= 1 ? ARGS[1] : "optimized_pulse.jld2"
+pulse_file = length(ARGS) >= 1 ? ARGS[1] : "GRAPE_pulse.jld2"
 
 println("Loading pulse from: $pulse_file")
 pulse = PulseFull(pulse_file)
