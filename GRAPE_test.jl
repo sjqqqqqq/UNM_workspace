@@ -35,7 +35,7 @@ end
 
 # ===== GRAPE OPTIMIZATION PARAMETERS =====
 n_steps = 100           # Number of time steps
-T = 10.0                # Total evolution time
+T = π                # Total evolution time
 
 # Time grid
 tlist = collect(range(0, T, length=n_steps+1))
