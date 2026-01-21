@@ -35,7 +35,7 @@ end
 
 # ===== GRAPE OPTIMIZATION PARAMETERS =====
 n_steps = 100           # Number of time steps
-T = π                # Total evolution time
+T = 2π                # Total evolution time
 
 # Time grid
 tlist = collect(range(0, T, length=n_steps+1))
@@ -73,11 +73,11 @@ function ϵ_U(t)
 end
 
 function ϵ_Ja(t)
-    return 1.0 * QuantumControl.Shapes.flattop(t, T=T, t_rise=0.5, func=:blackman)
+    return 1.0 
 end
 
 function ϵ_Jb(t)
-    return 1.0 * QuantumControl.Shapes.flattop(t, T=T, t_rise=0.5, func=:blackman)
+    return 1.0 
 end
 
 # ===== CONSTRUCT HAMILTONIAN =====
@@ -128,14 +128,14 @@ println("Target state: (|0,1⟩ + |2,3⟩)/√2")
 # ===== SETUP CONTROL PROBLEM =====
 trajectories = [Trajectory(initial_state=psi0, generator=H, target_state=psi_target)]
 
-using QuantumControl.Functionals: J_T_sm
+using QuantumControl.Functionals: J_T_ss
 
 problem = ControlProblem(
     trajectories=trajectories,
     tlist=tlist,
     iter_stop=500,
     prop_method=ExpProp,
-    J_T=J_T_sm,
+    J_T=J_T_ss,
     check_convergence=res -> begin
         ((res.J_T < 1e-5) && (res.converged = true) && (res.message = "J_T < 10⁻⁵"))
     end,

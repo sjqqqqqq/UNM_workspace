@@ -208,16 +208,16 @@ plot!(xlabel="Time", ylabel="Hopping Strength",
 combined_plot = plot(p1, p2, p3, p4, layout=(2, 2), size=(1200, 900))
 
 # Save plots
-savefig(p1, "fidelity_vs_time.png")
-savefig(p2, "V_vs_time.png")
-savefig(p3, "U_vs_time.png")
-savefig(p4, "J_vs_time.png")
-savefig(combined_plot, "ode_simulation_results.png")
+# savefig(p1, "fidelity_vs_time.png")
+# savefig(p2, "V_vs_time.png")
+# savefig(p3, "U_vs_time.png")
+# savefig(p4, "J_vs_time.png")
+# savefig(combined_plot, "ode_simulation_results.png")
 
-println("\nPlots saved:")
-println("  1. fidelity_vs_time.png")
-println("  2. V_vs_time.png")
-println("  3. U_vs_time.png")
-println("  4. J_vs_time.png")
-println("  5. ode_simulation_results.png (combined)")
+# println("\nPlots saved:")
+# println("  1. fidelity_vs_time.png")
+# println("  2. V_vs_time.png")
+# println("  3. U_vs_time.png")
+# println("  4. J_vs_time.png")
+# println("  5. ode_simulation_results.png (combined)")
 
