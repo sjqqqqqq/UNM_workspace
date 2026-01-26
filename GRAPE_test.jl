@@ -210,26 +210,3 @@ println("  n = $n_steps time steps")
 println("  T = $T total time")
 println("  dt = $dt step size")
 println("  Final fidelity ≈ $final_fidelity")
-
-# ===== VERIFY WITH PIECEWISE PROPAGATION =====
-println("\nVerifying optimized pulse with piecewise propagation...")
-
-function verify_propagation(psi0, n_steps, dt, Va, Vb, U, Ja, Jb)
-    psi = copy(psi0)
-    for k in 1:n_steps
-        H = zeros(ComplexF64, 16, 16)
-        for s in 1:4
-            H .+= Va[k, s] .* P_a_sites[s]
-            H .+= Vb[k, s] .* P_b_sites[s]
-        end
-        H .+= U[k] .* Hint_base
-        H .+= Ja[k] .* Hhop_a
-        H .+= Jb[k] .* Hhop_b
-        psi = exp(-1im * dt * H) * psi
-    end
-    return psi
-end
-
-psi_final = verify_propagation(psi0, n_steps, dt, Va_opt, Vb_opt, U_opt, Ja_opt, Jb_opt)
-verify_fidelity = abs2(dot(psi_target, psi_final))
-println("Verified fidelity (piecewise): $verify_fidelity")
