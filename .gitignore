@@ -16,3 +16,5 @@ trace_*.py
 trace_*.jl
 compare_outputs.*
 python_random_init.txt
+
+CLAUDE.md
